@@ -1,0 +1,115 @@
+# GitLab CI/CD: lint -> test -> build -> scan -> deploy (Helm) to a test Kubernetes cluster.
+# Needed CI/CD variables (Settings > CI/CD > Variables):
+#   KUBE_CONFIG_TEST  - type "File", kubeconfig of the test cluster (kind/k3s)
+# Registry credentials (CI_REGISTRY_*) are provided by GitLab automatically.
+
+stages: [lint, test, build, scan, deploy]
+
+variables:
+  IMAGE: $CI_REGISTRY_IMAGE
+  TAG: $CI_COMMIT_SHORT_SHA
+  RELEASE: status-api
+  NAMESPACE: status-api
+
+lint:yaml:
+  stage: lint
+  image: python:3.12-slim
+  script:
+    - pip install --quiet yamllint
+    - yamllint -c .yamllint .
+
+lint:helm:
+  stage: lint
+  image:
+    name: alpine/helm:3.16.3
+    entrypoint: [""]
+  script:
+    - helm lint helm/status-api
+    - helm template $RELEASE helm/status-api > rendered.yaml
+  artifacts:
+    paths: [rendered.yaml]
+    expire_in: 1 day
+
+validate:manifests:
+  stage: lint
+  needs: ["lint:helm"]
+  image:
+    name: ghcr.io/yannh/kubeconform:v0.6.7-alpine
+    entrypoint: [""]
+  script:
+    - /kubeconform -strict -summary rendered.yaml
+
+test:unit:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - pip install --quiet -r app/requirements.txt pytest
+    - pytest -q --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+build:image:
+  stage: build
+  image: docker:27
+  services:
+    - docker:27-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --build-arg APP_VERSION=$TAG -t $IMAGE:$TAG .
+    - docker push $IMAGE:$TAG
+    - |
+      if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then
+        docker tag $IMAGE:$TAG $IMAGE:latest
+        docker push $IMAGE:latest
+      fi
+
+scan:trivy:
+  stage: scan
+  image:
+    name: aquasec/trivy:0.57.0
+    entrypoint: [""]
+  variables:
+    TRIVY_USERNAME: $CI_REGISTRY_USER
+    TRIVY_PASSWORD: $CI_REGISTRY_PASSWORD
+  script:
+    # fail the pipeline on fixable HIGH/CRITICAL vulnerabilities
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed $IMAGE:$TAG
+
+deploy:test:
+  stage: deploy
+  image:
+    name: alpine/helm:3.16.3
+    entrypoint: [""]
+  environment:
+    name: test
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    - export KUBECONFIG=$KUBE_CONFIG_TEST
+    - >
+      helm upgrade --install $RELEASE helm/status-api
+      --namespace $NAMESPACE --create-namespace
+      --set image.repository=$IMAGE
+      --set image.tag=$TAG
+      --set "imagePullSecrets[0].name=gitlab-registry"
+      --atomic --wait --timeout 3m
+    - helm history $RELEASE -n $NAMESPACE --max 5
+
+rollback:test:
+  stage: deploy
+  image:
+    name: alpine/helm:3.16.3
+    entrypoint: [""]
+  environment:
+    name: test
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  script:
+    - export KUBECONFIG=$KUBE_CONFIG_TEST
+    - helm rollback $RELEASE -n $NAMESPACE --wait

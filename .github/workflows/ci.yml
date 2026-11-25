@@ -1,0 +1,66 @@
+# Same pipeline on GitHub Actions, plus an end-to-end deploy into a throwaway kind cluster.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r app/requirements.txt pytest yamllint
+      - run: yamllint -c .yamllint .
+      - run: pytest -q
+
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint helm/status-api
+      - name: Validate rendered manifests
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          helm template status-api helm/status-api | ./kubeconform -strict -summary
+
+  build-scan-deploy:
+    needs: [test, helm-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build --build-arg APP_VERSION=${GITHUB_SHA::7} -t status-api:ci .
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: status-api:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - uses: azure/setup-helm@v4
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          config: cluster/kind-config.yaml
+          cluster_name: lab
+      - name: Load image and deploy with Helm
+        run: |
+          kind load docker-image status-api:ci --name lab
+          helm upgrade --install status-api helm/status-api \
+            --namespace status-api --create-namespace \
+            --set image.repository=status-api --set image.tag=ci \
+            --atomic --wait --timeout 3m
+      - name: Smoke test
+        run: |
+          kubectl -n status-api get pods -o wide
+          kubectl -n status-api run curl --rm -i --restart=Never --image=curlimages/curl:8.10.1 -- \
+            curl -sf http://status-api-status-api/healthz

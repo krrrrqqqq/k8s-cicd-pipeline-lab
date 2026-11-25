@@ -1,0 +1,10 @@
+.git
+.github
+.gitlab-ci.yml
+helm
+cluster
+scripts
+**/__pycache__
+**/.pytest_cache
+app/tests
+*.md

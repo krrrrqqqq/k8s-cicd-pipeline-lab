@@ -1,0 +1,8 @@
+extends: default
+ignore: |
+  helm/status-api/templates/
+rules:
+  line-length: disable
+  document-start: disable
+  truthy:
+    check-keys: false

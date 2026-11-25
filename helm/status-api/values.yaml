@@ -1,0 +1,42 @@
+replicaCount: 2
+
+image:
+  repository: registry.gitlab.com/CHANGE_ME/k8s-cicd-pipeline-lab
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+env:
+  APP_ENV: test
+  LOG_LEVEL: INFO
+  WARMUP_SECONDS: "5"
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: nginx
+  host: status-api.local
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+# Lets VictoriaMetrics vmagent / Prometheus find the /metrics endpoint
+metrics:
+  scrape: true
+  path: /metrics
