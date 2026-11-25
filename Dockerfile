@@ -13,6 +13,12 @@ ENV PATH="/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     APP_VERSION=${APP_VERSION}
 
+# Apply current Debian security updates in the runtime image.
+RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --uid 10001 --no-create-home appuser
 WORKDIR /srv
 COPY --from=build /venv /venv
